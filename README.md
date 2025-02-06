@@ -25,7 +25,6 @@ and customizable experience. It prioritizes performance and player enjoyment whi
 ## What Pumpkin will not
 
 - Be compatible with plugins or mods for other servers
-- Function as a framework for building a server from scratch.
 
 > [!IMPORTANT]
 > Pumpkin is currently under heavy development.
@@ -50,9 +49,9 @@ and customizable experience. It prioritizes performance and player enjoyment whi
   - [x] Lighting
   - [x] Entity Spawning
   - [x] Bossbar
-  - [x] Chunk Loading
+  - [x] Chunk Loading (Vanilla, Linear)
   - [x] Chunk Generation
-  - [x] Chunk Saving
+  - [x] Chunk Saving (Vanilla, Linear)
   - [x] World Time
   - [x] Scoreboard
   - [x] World Borders
@@ -68,7 +67,7 @@ and customizable experience. It prioritizes performance and player enjoyment whi
   - [x] Player Inventory
   - [x] Player Combat
 - Entities
-  - [ ] Non-Living (Minecart, Eggs...)
+  - [x] Non-Living (Minecart, Eggs...)
   - [x] Players
   - [x] Mobs
   - [x] Animals
@@ -83,11 +82,12 @@ and customizable experience. It prioritizes performance and player enjoyment whi
   - [x] Chat
   - [x] Commands
   - [x] Permissions
+  - [x] Translations
 - Proxy
   - [x] Bungeecord
   - [x] Velocity
 
-Check out our [Github Project](https://github.com/users/Snowiiii/projects/12/views/3) to see current progress
+Check out our [Github Project](https://github.com/orgs/Pumpkin-MC/projects/3) to see current progress
 
 ## How to run
 

@@ -7,10 +7,7 @@ use std::{
 use dashmap::{DashMap, Entry};
 use log::info;
 use num_traits::Zero;
-use pumpkin_config::{
-    chunk::{self, ChunkFormat},
-    ADVANCED_CONFIG,
-};
+use pumpkin_config::{chunk::ChunkFormat, ADVANCED_CONFIG};
 use pumpkin_util::math::vector2::Vector2;
 use rayon::iter::{
     IntoParallelIterator, IntoParallelRefIterator, ParallelBridge, ParallelIterator,
@@ -22,8 +19,8 @@ use tokio::{
 
 use crate::{
     chunk::{
-        anvil::AnvilChunkFormat, linear::LinearChunkFormat, ChunkData, ChunkReader,
-        ChunkReadingError, ChunkWriter,
+        anvil::AnvilChunkFormat, linear::LinearChunkFormat, ChunkData, ChunkParsingError,
+        ChunkReader, ChunkReadingError, ChunkWriter,
     },
     generation::{get_world_gen, Seed, WorldGenerator},
     lock::{anvil::AnvilLevelLocker, LevelLocker},
@@ -72,7 +69,7 @@ impl Level {
             region_folder,
         };
 
-        // if we fail to lock, lets crash ???. maybe not the best soultion when we have a large server with many worlds and one is locked.
+        // if we fail to lock, lets crash ???. maybe not the best solution when we have a large server with many worlds and one is locked.
         // So TODO
         let locker = AnvilLevelLocker::look(&level_folder).expect("Failed to lock level");
 
@@ -83,23 +80,19 @@ impl Level {
         let seed = Seed(level_info.world_gen_settings.seed as u64);
         let world_gen = get_world_gen(seed).into();
 
-        let format_reader: Arc<dyn ChunkReader> = match ADVANCED_CONFIG.chunk.file_format {
-            ChunkFormat::Anvil => Arc::new(AnvilChunkFormat),
-            ChunkFormat::Linear => Arc::new(LinearChunkFormat),
-        };
-
-        let format_writer: Arc<dyn ChunkWriter> = match ADVANCED_CONFIG.chunk.file_format {
-            ChunkFormat::Anvil => Arc::new(AnvilChunkFormat),
-            ChunkFormat::Linear => Arc::new(LinearChunkFormat),
-        };
+        let chunk_format: (Arc<dyn ChunkReader>, Arc<dyn ChunkWriter>) =
+            match ADVANCED_CONFIG.chunk.format {
+                ChunkFormat::Anvil => (Arc::new(AnvilChunkFormat), Arc::new(AnvilChunkFormat)),
+                ChunkFormat::Linear => (Arc::new(LinearChunkFormat), Arc::new(LinearChunkFormat)),
+            };
 
         Self {
             seed,
             world_gen,
             world_info_writer: Arc::new(AnvilLevelInfo),
             level_folder,
-            chunk_reader: format_reader,
-            chunk_writer: format_writer,
+            chunk_reader: chunk_format.0,
+            chunk_writer: chunk_format.1,
             loaded_chunks: Arc::new(DashMap::new()),
             chunk_watchers: Arc::new(DashMap::new()),
             level_info,
@@ -109,16 +102,8 @@ impl Level {
 
     pub async fn save(&self) {
         log::info!("Saving level...");
+        // chunks are automatically saved when all players get removed
         // lets first save all chunks
-
-        self.clean_chunks(
-            self.loaded_chunks
-                .iter()
-                .map(|entry| *entry.key())
-                .collect::<Vec<_>>()
-                .as_slice(),
-        )
-        .await;
 
         // then lets save the world info
         self.world_info_writer
@@ -249,26 +234,32 @@ impl Level {
         }
 
         let chunks = chunks_to_write
-            .par_iter()
-            .map(|(pos, chunk)| (*pos, chunk.read()))
+            .iter()
+            .map(|(pos, chunk)| (*pos, chunk.clone()))
             .collect::<Vec<_>>();
+        tokio::spawn(async move {
+            let chunks = chunks
+                .par_iter()
+                .map(|(pos, chunk)| (*pos, chunk.read()))
+                .collect::<Vec<_>>();
 
-        let mut chunk_guards = Vec::with_capacity(chunks.len());
+            let mut chunk_guards = Vec::with_capacity(chunks.len());
 
-        for (pos, guard) in chunks {
-            chunk_guards.push((pos, guard.await));
-        }
+            for (pos, guard) in chunks {
+                chunk_guards.push((pos, guard.await));
+            }
 
-        let chunks = chunk_guards
-            .par_iter()
-            .map(|(pos, guard)| (*pos, guard.deref()))
-            .collect::<Vec<_>>();
+            let chunks = chunk_guards
+                .par_iter()
+                .map(|(pos, guard)| (*pos, guard.deref()))
+                .collect::<Vec<_>>();
 
-        info!("Writing chunks to disk {:}", chunks.len());
+            info!("Writing chunks to disk {:}", chunks.len());
 
-        if let Err(error) = writer.write_chunks(&level_folder, &chunks) {
-            log::error!("Failed writing Chunk to disk {}", error.to_string());
-        }
+            if let Err(error) = writer.write_chunks(&level_folder, &chunks) {
+                log::error!("Failed writing Chunk to disk {}", error.to_string());
+            }
+        });
     }
 
     fn load_chunks_from_save(
@@ -295,7 +286,7 @@ impl Level {
     pub fn fetch_chunks(
         &self,
         chunks: &[Vector2<i32>],
-        channel: mpsc::Sender<Arc<RwLock<ChunkData>>>,
+        channel: mpsc::Sender<(Arc<RwLock<ChunkData>>, bool)>,
         rt: &Handle,
     ) {
         if chunks.is_empty() {
@@ -309,7 +300,7 @@ impl Level {
                     let chunk = loaded_chunk.value().clone();
                     let channel = channel.clone();
                     rt.spawn(async move {
-                        let _ = channel.send(chunk).await.inspect_err(|err| {
+                        let _ = channel.send((chunk, false)).await.inspect_err(|err| {
                             log::error!("unable to send chunk to channel: {}", err)
                         });
                     });
@@ -332,14 +323,15 @@ impl Level {
         .unwrap()
         .into_par_iter()
         .for_each(|(pos, chunk)| {
+            let mut first_load = false;
             let chunk = self
                 .loaded_chunks
                 .entry(pos)
                 .or_insert_with(|| match chunk {
                     Some(chunk) => chunk,
                     None => {
-                        let chunk = self.world_gen.generate_chunk(pos);
-                        Arc::new(RwLock::new(chunk))
+                        first_load = true;
+                        Arc::new(RwLock::new(self.world_gen.generate_chunk(pos)))
                     }
                 })
                 .clone();
@@ -347,7 +339,7 @@ impl Level {
             let channel = channel.clone();
             rt.spawn(async move {
                 let _ = channel
-                    .send(chunk)
+                    .send((chunk, first_load))
                     .await
                     .inspect_err(|err| log::error!("unable to send chunk to channel: {}", err));
             });

@@ -158,12 +158,6 @@ impl Client {
 
             *gameprofile = Some(profile);
         }
-
-        drop(gameprofile);
-
-        if let Some(reason) = self.can_not_join().await {
-            self.kick(&reason).await;
-        }
     }
 
     pub async fn handle_encryption_response(
@@ -239,11 +233,7 @@ impl Client {
     }
 
     async fn enable_compression(&self) {
-        let compression = ADVANCED_CONFIG
-            .networking
-            .packet_compression
-            .compression_info
-            .clone();
+        let compression = ADVANCED_CONFIG.networking.packet_compression.info.clone();
         self.send_packet(&CSetCompression::new(compression.threshold.into()))
             .await;
         self.set_compression(Some(compression)).await;
@@ -340,17 +330,14 @@ impl Client {
         let resource_config = &ADVANCED_CONFIG.resource_pack;
         if resource_config.enabled {
             let resource_pack = CConfigAddResourcePack::new(
-                Uuid::new_v3(
-                    &uuid::Uuid::NAMESPACE_DNS,
-                    resource_config.resource_pack_url.as_bytes(),
-                ),
-                &resource_config.resource_pack_url,
-                &resource_config.resource_pack_sha1,
+                Uuid::new_v3(&uuid::Uuid::NAMESPACE_DNS, resource_config.url.as_bytes()),
+                &resource_config.url,
+                &resource_config.sha1,
                 resource_config.force,
-                if resource_config.prompt_message.is_empty() {
+                if resource_config.message.is_empty() {
                     None
                 } else {
-                    Some(TextComponent::text(&resource_config.prompt_message))
+                    Some(TextComponent::text(&resource_config.message))
                 },
             );
 

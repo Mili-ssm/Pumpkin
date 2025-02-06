@@ -17,7 +17,7 @@ pub mod sound {
 
 pub mod chunk {
     include!(concat!(env!("OUT_DIR"), "/biome.rs"));
-    include!(concat!(env!("OUT_DIR"), "/noise_parmeter.rs"));
+    include!(concat!(env!("OUT_DIR"), "/noise_parameter.rs"));
     include!(concat!(env!("OUT_DIR"), "/chunk_status.rs"));
 }
 
@@ -37,4 +37,8 @@ pub mod world {
 
 pub mod scoreboard {
     include!(concat!(env!("OUT_DIR"), "/scoreboard_slot.rs"));
+}
+
+pub mod damage {
+    include!(concat!(env!("OUT_DIR"), "/damage_type.rs"));
 }
