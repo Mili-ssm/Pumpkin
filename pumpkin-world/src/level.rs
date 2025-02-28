@@ -1,17 +1,18 @@
 use std::{fs, path::PathBuf, sync::Arc};
 
+use async_stream::stream;
 use dashmap::{DashMap, Entry};
-use futures::future::join_all;
+use futures::{Stream, future::join_all};
 use log::trace;
 use num_traits::Zero;
 use pumpkin_config::{ADVANCED_CONFIG, chunk::ChunkFormat};
 use pumpkin_util::math::vector2::Vector2;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use tokio::sync::{RwLock, mpsc};
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use tokio::sync::RwLock;
 
 use crate::{
     chunk::{
-        ChunkData, ChunkReadingError,
+        ChunkData,
         format::{anvil::AnvilChunkFile, linear::LinearFile},
         io::{ChunkIO, LoadedData, chunk_file_manager::ChunkFileManager},
     },
@@ -303,109 +304,91 @@ impl Level {
     async fn load_chunks_from_save(
         &self,
         chunks_pos: &[Vector2<i32>],
-        channel: mpsc::Sender<(Vector2<i32>, Option<ChunkData>)>,
-    ) {
+    ) -> Box<[(Vector2<i32>, Option<ChunkData>)]> {
         trace!("Loading chunks from disk {:}", chunks_pos.len());
 
-        let (send, recv) =
-            mpsc::channel::<LoadedData<ChunkData, ChunkReadingError>>(chunks_pos.len());
-        let converter_task = async move {
-            let mut recv = recv;
-            while let Some(data) = recv.recv().await {
-                let converted = match data {
-                    LoadedData::Loaded(chunk) => (chunk.position, Some(chunk)),
-                    LoadedData::Missing(pos) => (pos, None),
-                    LoadedData::Error((position, error)) => {
-                        log::error!(
-                            "Failed to load chunk at {:?}: {} (regenerating)",
-                            position,
-                            error
-                        );
-                        (position, None)
-                    }
-                };
-
-                channel
-                    .send(converted)
-                    .await
-                    .expect("Failed to stream chunks from converter!");
-            }
-        };
-
-        let stream_task = self
-            .chunk_saver
-            .fetch_chunks(&self.level_folder, chunks_pos, send);
-
-        let _ = tokio::join!(converter_task, stream_task);
+        self.chunk_saver
+            .fetch_chunks(&self.level_folder, chunks_pos)
+            .await
+            .into_iter()
+            .map(|data| match data {
+                LoadedData::Loaded(chunk) => (chunk.position, Some(chunk)),
+                LoadedData::Missing(pos) => (pos, None),
+                LoadedData::Error((pos, error)) => {
+                    log::error!(
+                        "Failed to load chunk at {:?}: {} (regenerating)",
+                        pos,
+                        error
+                    );
+                    (pos, None)
+                }
+            })
+            .collect()
     }
 
     /// Reads/Generates many chunks in a world
     /// Note: The order of the output chunks will almost never be in the same order as the order of input chunks
-    pub async fn fetch_chunks(
+    pub fn fetch_chunks(
         self: &Arc<Self>,
-        chunks: &[Vector2<i32>],
-        channel: mpsc::Sender<(Arc<RwLock<ChunkData>>, bool)>,
-    ) {
-        if chunks.is_empty() {
-            return;
-        }
+        chunks: Box<[Vector2<i32>]>,
+    ) -> impl Stream<Item = (Arc<RwLock<ChunkData>>, bool)> {
+        stream! {
 
-        let gen_channel = channel.clone();
-        let send_chunk = async move |is_new: bool, chunk: Arc<RwLock<ChunkData>>| {
-            let _ = channel
-                .send((chunk, is_new))
-                .await
-                .inspect_err(|err| log::error!("unable to send chunk to channel: {}", err));
-        };
-
-        // First send all chunks that we have cached
-        let mut remaining_chunks = Vec::new();
-        for chunk in chunks {
-            if let Some(chunk) = self.loaded_chunks.get(chunk) {
-                send_chunk(false, chunk.value().clone()).await;
-            } else {
-                remaining_chunks.push(*chunk);
+            if chunks.is_empty() {
+                return;
             }
-        }
 
-        if remaining_chunks.is_empty() {
-            return;
-        }
 
-        // Then attempt to get chunks from disk, generating them if they do not exist
-        let (send, recv) = mpsc::channel(remaining_chunks.len());
-
-        let disk_read_task = self.load_chunks_from_save(&remaining_chunks, send);
-
-        let loaded_chunks = self.loaded_chunks.clone();
-        let world_gen = self.world_gen.clone();
-        let disk_handle_task = async move {
-            let mut recv = recv;
-            while let Some((pos, data)) = recv.recv().await {
-                if let Some(data) = data {
-                    let entry = loaded_chunks
-                        .entry(pos)
-                        .or_insert_with(|| Arc::new(RwLock::new(data)));
-                    let value = entry.clone();
-                    send_chunk(false, value).await;
+            // First send all chunks that we have cached
+            let mut remaining_chunks = Vec::new();
+            for chunk in chunks {
+                if let Some(chunk) = self.loaded_chunks.get(&chunk) {
+                    yield ( chunk.value().clone(),false);
                 } else {
-                    let loaded_chunks = loaded_chunks.clone();
-                    let world_gen = world_gen.clone();
-                    let gen_channel = gen_channel.clone();
-                    rayon::spawn(move || {
-                        let data = world_gen.generate_chunk(pos);
-                        let entry = loaded_chunks
-                            .entry(pos)
-                            .or_insert_with(|| Arc::new(RwLock::new(data)));
-                        let value = entry.clone();
-                        gen_channel
-                            .blocking_send((value, true))
-                            .expect("Failed to send chunk from generation thread!");
-                    });
+                    remaining_chunks.push(chunk);
                 }
             }
-        };
 
-        let _ = tokio::join!(disk_read_task, disk_handle_task);
+            if remaining_chunks.is_empty() {
+                return;
+            }
+
+            let stream = self.load_chunks_from_save(&remaining_chunks).await;
+
+
+            let mut to_generate = Vec::new();
+           for (pos, chunk) in stream {
+                if let Some(chunk) = chunk{
+                    let chunk = match self.loaded_chunks.entry(pos){
+                        Entry::Occupied(occupied) => occupied.get().clone(),
+                        Entry::Vacant(vacant) => vacant.insert(Arc::new(RwLock::new(chunk))).value().clone(),
+                    };
+                    yield (chunk, false);
+                } else {
+                    to_generate.push(pos);
+                }
+
+            }
+
+            if to_generate.is_empty() {
+                return;
+            }
+
+            log::info!("Generating {} chunks", to_generate.len());
+
+            let generated_chunks = to_generate.into_par_iter().map(|pos| {
+                let chunk = self.world_gen.generate_chunk(pos);
+                (pos, chunk)
+            }).collect::<Vec<_>>();
+
+            for (pos, chunk) in generated_chunks {
+                let chunk = match self.loaded_chunks.entry(pos){
+                    Entry::Occupied(occupied) => occupied.get().clone(),
+                    Entry::Vacant(vacant) => vacant.insert(Arc::new(RwLock::new(chunk))).value().clone(),
+                };
+                yield (chunk, true);
+            }
+
+        }
     }
 }

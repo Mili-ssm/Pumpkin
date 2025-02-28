@@ -7,12 +7,12 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::future::join_all;
+use futures::future::{self, join_all};
 use log::{error, trace};
 use pumpkin_util::math::vector2::Vector2;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::{OnceCell, RwLock, mpsc},
+    sync::{OnceCell, RwLock},
 };
 
 use crate::{
@@ -182,8 +182,7 @@ where
         &self,
         folder: &LevelFolder,
         chunk_coords: &[Vector2<i32>],
-        channel: mpsc::Sender<LoadedData<D, ChunkReadingError>>,
-    ) {
+    ) -> Vec<LoadedData<D, ChunkReadingError>> {
         let mut regions_chunks: BTreeMap<String, Vec<Vector2<i32>>> = BTreeMap::new();
 
         for &at in chunk_coords {
@@ -205,34 +204,26 @@ where
                     unreachable!("Default Serializer must be created")
                 }
                 Err(err) => {
-                    channel
-                        .send(LoadedData::<D, ChunkReadingError>::Error((chunks[0], err)))
-                        .await
-                        .expect("Failed to send error from stream_chunks!");
-
-                    return;
+                    log::error!("Error reading the data: {:?}", err);
+                    return vec![LoadedData::<D, ChunkReadingError>::Error((chunks[0], err))];
                 }
             };
 
             // We need to block the read to avoid other threads to write/modify the data
             let chunk_guard = chunk_serializer.read().await;
 
-            let streaming_tasks = chunk_guard
-                .get_chunks(&chunks)
-                .into_iter()
-                .map(async |chunk| {
-                    channel
-                        .send(chunk)
-                        .await
-                        .expect("Failed to send chunk from stream_chunks!");
-                });
-
-            join_all(streaming_tasks).await;
+            chunk_guard.get_chunks(&chunks)
         });
 
-        join_all(tasks).await;
+        let tasks = future::join_all(tasks).await;
+        let mut chunks = Vec::new();
+        for chunk in tasks {
+            chunks.extend(chunk);
+        }
 
         self.clean_cache().await;
+
+        chunks
     }
 
     async fn save_chunks(

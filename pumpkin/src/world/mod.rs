@@ -19,8 +19,10 @@ use crate::{
     },
     server::Server,
 };
+use async_stream::stream;
 use border::Worldborder;
 use explosion::Explosion;
+use futures::{Stream, StreamExt, pin_mut};
 use pumpkin_config::BasicConfiguration;
 use pumpkin_data::{
     entity::EntityType,
@@ -60,8 +62,7 @@ use rand::{Rng, thread_rng};
 use scoreboard::Scoreboard;
 use thiserror::Error;
 use time::LevelTime;
-use tokio::sync::{Mutex, mpsc::Receiver};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock};
 
 pub mod border;
 pub mod bossbar;
@@ -691,11 +692,13 @@ impl World {
             rel_x * rel_x + rel_z * rel_z
         });
 
-        let mut receiver = self.receive_chunks(chunks);
         let level = self.level.clone();
 
         tokio::spawn(async move {
-            'main: while let Some((chunk, first_load)) = receiver.recv().await {
+            let receiver = Self::receive_chunks(level.clone(), chunks);
+            pin_mut!(receiver);
+
+            'main: while let Some((chunk, first_load)) = receiver.next().await {
                 let position = chunk.read().await.position;
 
                 #[cfg(debug_assertions)]
@@ -1054,23 +1057,24 @@ impl World {
     /// Important: must be called from an async function (or changed to accept a tokio runtime
     /// handle)
     pub fn receive_chunks(
-        &self,
+        level: Arc<Level>,
         chunks: Vec<Vector2<i32>>,
-    ) -> Receiver<(Arc<RwLock<ChunkData>>, bool)> {
-        let (sender, receive) = mpsc::channel(chunks.len());
-        // Put this in another thread so we aren't blocking on it
-        let level = self.level.clone();
-        tokio::spawn(async move {
-            level.fetch_chunks(&chunks, sender).await;
-        });
+    ) -> impl Stream<Item = (Arc<RwLock<ChunkData>>, bool)> {
+        stream! {
+            let stream = level.fetch_chunks(chunks.into_boxed_slice());
+            pin_mut!(stream);
+            for await item in stream {
+                yield item;
+            }
 
-        receive
+        }
     }
 
     pub async fn receive_chunk(&self, chunk_pos: Vector2<i32>) -> (Arc<RwLock<ChunkData>>, bool) {
-        let mut receiver = self.receive_chunks(vec![chunk_pos]);
+        let receiver = Self::receive_chunks(self.level.clone(), vec![chunk_pos]);
+        pin_mut!(receiver);
         let chunk = receiver
-            .recv()
+            .next()
             .await
             .expect("Channel closed for unknown reason");
 

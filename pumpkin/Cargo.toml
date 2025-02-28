@@ -34,6 +34,8 @@ tokio.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
+async-stream.workspace = true
+futures.workspace = true
 
 # config
 serde.workspace = true
