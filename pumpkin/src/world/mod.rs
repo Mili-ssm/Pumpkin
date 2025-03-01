@@ -19,10 +19,9 @@ use crate::{
     },
     server::Server,
 };
-use async_stream::stream;
 use border::Worldborder;
 use explosion::Explosion;
-use futures::{Stream, StreamExt, pin_mut};
+use futures::{StreamExt, pin_mut};
 use pumpkin_config::BasicConfiguration;
 use pumpkin_data::{
     entity::EntityType,
@@ -695,10 +694,10 @@ impl World {
         let level = self.level.clone();
 
         tokio::spawn(async move {
-            let receiver = Self::receive_chunks(level.clone(), chunks);
-            pin_mut!(receiver);
+            let chunk_stream = level.fetch_chunks(chunks);
+            pin_mut!(chunk_stream);
 
-            'main: while let Some((chunk, first_load)) = receiver.next().await {
+            'main: while let Some((chunk, first_load)) = chunk_stream.next().await {
                 let position = chunk.read().await.position;
 
                 #[cfg(debug_assertions)]
@@ -1053,27 +1052,10 @@ impl World {
         replaced_block_state_id
     }
 
-    // Stream the chunks (don't collect them and then do stuff with them)
-    /// Important: must be called from an async function (or changed to accept a tokio runtime
-    /// handle)
-    pub fn receive_chunks(
-        level: Arc<Level>,
-        chunks: Vec<Vector2<i32>>,
-    ) -> impl Stream<Item = (Arc<RwLock<ChunkData>>, bool)> {
-        stream! {
-            let stream = level.fetch_chunks(chunks.into_boxed_slice());
-            pin_mut!(stream);
-            for await item in stream {
-                yield item;
-            }
-
-        }
-    }
-
     pub async fn receive_chunk(&self, chunk_pos: Vector2<i32>) -> (Arc<RwLock<ChunkData>>, bool) {
-        let receiver = Self::receive_chunks(self.level.clone(), vec![chunk_pos]);
-        pin_mut!(receiver);
-        let chunk = receiver
+        let chunk_stream = self.level.fetch_chunks(vec![chunk_pos]);
+        pin_mut!(chunk_stream);
+        let chunk = chunk_stream
             .next()
             .await
             .expect("Channel closed for unknown reason");

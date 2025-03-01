@@ -304,7 +304,7 @@ impl Level {
     async fn load_chunks_from_save(
         &self,
         chunks_pos: &[Vector2<i32>],
-    ) -> Box<[(Vector2<i32>, Option<ChunkData>)]> {
+    ) -> Vec<(Vector2<i32>, Option<ChunkData>)> {
         trace!("Loading chunks from disk {:}", chunks_pos.len());
 
         self.chunk_saver
@@ -330,7 +330,7 @@ impl Level {
     /// Note: The order of the output chunks will almost never be in the same order as the order of input chunks
     pub fn fetch_chunks(
         self: &Arc<Self>,
-        chunks: Box<[Vector2<i32>]>,
+        chunks: Vec<Vector2<i32>>,
     ) -> impl Stream<Item = (Arc<RwLock<ChunkData>>, bool)> {
         stream! {
 
@@ -354,7 +354,6 @@ impl Level {
             }
 
             let stream = self.load_chunks_from_save(&remaining_chunks).await;
-
 
             let mut to_generate = Vec::new();
            for (pos, chunk) in stream {
